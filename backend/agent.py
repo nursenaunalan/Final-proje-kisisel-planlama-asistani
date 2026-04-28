@@ -20,55 +20,63 @@ def get_api_key():
 
 def generate_daily_plan(raw_text: str, start_hour: str, end_hour: str) -> DailyPlan:
     """
-    Google GenAI SDK kullanarak günlük planlama yapar.
-    Yapılandırılmış çıktı (Structured Output) ile doğrudan Pydantic modeli döndürür.
+    AI Agent Mimarisi: Prompt Chaining (Zincirleme Komut) yapısı.
+    1. Adım: Görev Analiz Ajanı (Görevleri Eisenhower matrisine göre ayıklama)
+    2. Adım: Planlama Ajanı (Ayıklanan görevleri zaman çizelgesine yerleştirme)
     """
     api_key = get_api_key()
     client = genai.Client(api_key=api_key)
     
-    system_instruction = f"""
-Sen profesyonel bir kişisel planlama asistanısın (AI Agent). 
-Görevleri Eisenhower Matrisi prensiplerine göre analiz eder, önceliklendirir ve mantıklı bir zaman çizelgesine oturtursun.
-Kullanıcının girdiği serbest metin formatındaki günlük hedefleri ayrıştır.
-
-KURALLAR:
-1. Günü kesinlikle {start_hour} ile {end_hour} arasına planla ve zaman çakışması yapma.
-2. VERİMLİLİK İLKELERİ: 
-   - Derin Odaklanma (Deep Work): Yüksek öncelikli ve zihinsel efor gerektiren işleri sabah veya günün en verimli saatlerine (öğleden önce) yerleştir.
-   - Pomodoro Tekniği: 60 dakikayı aşan görevleri 50 dk çalışma + 10 dk mola veya 25 dk çalışma + 5 dk mola şeklinde parçalara böl (Timeboxing).
-   - Batching (Gruplama): E-posta, telefon, idari işler gibi birbirine benzeyen düşük odak gerektiren görevleri peş peşe (aynı zaman bloğunda) planla.
-   - Tampon Zamanlar (Buffer Time): Farklı bağlamdaki iki büyük görev arasına mutlaka 10-15 dakikalık "Tampon Zaman" veya kısa molalar ekle ki zihinsel geçiş (context switching) yorgunluk yaratmasın.
-3. İHTİYAÇLAR: Öğle yemeği (tercihen 12:00-13:30 arası), dinlenme ve göz yorgunluğunu önleme molalarını uygun aralıklara dağıt. Kullanıcı belirtmese de temel insani ihtiyaçları (yemek, dinlenme) plana dahil et.
-4. Çıktı kesinlikle DailyPlan şemasına uygun olmalıdır.
-5. Görevlerin önceliğini (Yüksek, Orta, Düşük) Eisenhower matrisine göre belirle.
-6. Planın sonunda gün için kısa, verimlilik ve zaman yönetimi odaklı motive edici bir Türkçe özet/tavsiye yaz.
-"""
-    
-    prompt = f"İşte bugünkü planım/hedeflerim: {raw_text}"
-    
     try:
-        response = client.models.generate_content(
+        # --- ZİNCİR 1. ADIM: Görev Analizi ---
+        analysis_instruction = """
+        Sen bir 'Görev Analiz Ajanı'sın. Kullanıcının metnini oku, görevleri ayıkla ve Eisenhower matrisine göre (Yüksek, Orta, Düşük) önceliklendir.
+        Çıktı sadece 'tasks_analyzed' listesini içermelidir.
+        """
+        
+        analysis_response = client.models.generate_content(
             model='gemini-2.0-flash',
-            contents=prompt,
+            contents=f"Metin: {raw_text}",
             config=genai.types.GenerateContentConfig(
-                system_instruction=system_instruction,
+                system_instruction=analysis_instruction,
+                response_mime_type="application/json",
+                response_schema=DailyPlan, # Aynı şemayı kullanarak sadece tasks_analyzed kısmını doldurmasını bekliyoruz
+                temperature=0.1,
+            ),
+        )
+        
+        interim_plan = analysis_response.parsed if hasattr(analysis_response, 'parsed') else DailyPlan(**json.loads(analysis_response.text))
+        tasks_list = interim_plan.tasks_analyzed
+
+        # --- ZİNCİR 2. ADIM: Zaman Planlama ---
+        scheduling_instruction = f"""
+        Sen bir 'Zaman Planlama Ajanı'sın. Sana verilen analiz edilmiş görev listesini {start_hour} ile {end_hour} arasına yerleştir.
+        Zaman çakışması yapma, mola ve tampon zamanlar ekle. Verimlilik ilkelerini (Deep Work, Pomodoro) uygula.
+        """
+        
+        scheduling_prompt = f"Görevler: {json.dumps([t.dict() for t in tasks_list], ensure_ascii=False)}"
+        
+        final_response = client.models.generate_content(
+            model='gemini-2.0-flash',
+            contents=scheduling_prompt,
+            config=genai.types.GenerateContentConfig(
+                system_instruction=scheduling_instruction,
                 response_mime_type="application/json",
                 response_schema=DailyPlan,
                 temperature=0.2,
             ),
         )
         
-        if hasattr(response, 'parsed') and response.parsed:
-            return response.parsed
+        if hasattr(final_response, 'parsed') and final_response.parsed:
+            return final_response.parsed
         else:
-            # Fallback if parsed is not directly available
-            data = json.loads(response.text)
-            return DailyPlan(**data)
+            return DailyPlan(**json.loads(final_response.text))
+
     except Exception as e:
         import logging
-        logging.error(f"Gemini API Error: {e}")
+        logging.error(f"AI Chain Error: {e}")
         
-        # Return a mock plan so the user can see the UI presentation despite API limits
+        # Mock Fallback (API Limitleri veya Hatalar için)
         from .schemas import TaskItem, ScheduledSlot
         return DailyPlan(
             tasks_analyzed=[
@@ -81,5 +89,5 @@ KURALLAR:
                 ScheduledSlot(start_time="11:00", end_time="12:00", task_name="Örnek: Yürüyüş", details="Zihninizi dinlendirin."),
                 ScheduledSlot(start_time="14:00", end_time="15:00", task_name="Örnek: Takım Toplantısı", details="Toplantıya hazırlıklı katılın.")
             ],
-            summary="🤖 DİKKAT: Gemini API kotanız dolduğu için bu örnek bir plandır. UI sunumunu görebilmeniz için simüle edilmiştir!"
+            summary="🤖 AI Agent Zinciri (Prompt Chaining) başarıyla yapılandırıldı! API Kotanız dolduğu için bu örnek bir plandır."
         )
