@@ -2,6 +2,10 @@ import streamlit as st
 import requests
 import os
 import datetime
+import sys
+
+# Proje kök dizinini Python yoluna ekle (Backend modülünü bulabilmesi için)
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 # API URL - Canlı ortamda os.environ'dan alınabilir, lokalde localhost kullanır
 API_URL = os.getenv("API_URL", "http://localhost:8000/generate-plan")
